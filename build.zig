@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardOptimizeOption(.{});
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const lib_module = b.addModule("zbc", .{
@@ -22,5 +22,5 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_module,
     });
 
-    b.addRunArtifact(lib_unit_tests);
+    _ = b.addRunArtifact(lib_unit_tests);
 }
