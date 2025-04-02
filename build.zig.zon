@@ -1,6 +1,6 @@
 .{
     .name = .zbc,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .fingerprint = 0x25570d53bd295e78,
     .minimum_zig_version = "0.15.0-dev.37+423907c27",
     .paths = .{ "build.zig", "build.zig.zon", "src" },
