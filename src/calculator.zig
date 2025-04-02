@@ -1,14 +1,17 @@
 const std = @import("std");
-pub const Token = struct { tag: Tag, value: []const u8 };
 
-pub const Tag = enum {
-    number,
-    plus,
-    minus,
-    slash,
-    asterisk,
-    l_paren,
-    r_paren,
+const Token = union(Tag) {
+    operand: []const u8,
+    operator: u8,
+};
+const Tag = enum {
+    operand,
+    operator,
+};
+
+const CalculatorError = error{
+    InvalidExpression,
+    UnexpectedToken,
 };
 
 fn tokenize(allocator: std.mem.Allocator, input: *const []const u8) ![]Token {
@@ -18,37 +21,21 @@ fn tokenize(allocator: std.mem.Allocator, input: *const []const u8) ![]Token {
     var i: usize = 0;
     while (i < input.len) {
         switch (input.*[i]) {
-            '+' => {
-                try list.append(.{ .tag = .plus, .value = input.*[i .. i + 1] });
-                i += 1;
-            },
             '-' => {
-                if (i == 0 or (i > 0 and list.items[i - 1].tag != .number)) {
+                if (i == 0 or (i > 0 and list.items[i - 1] != .operand)) {
                     const start = i;
                     i += 1;
                     while (i < input.len and (std.ascii.isDigit(input.*[i]) or input.*[i] == '.')) {
                         i += 1;
                     }
-                    try list.append(.{ .tag = .number, .value = input.*[start..i] });
+                    try list.append(.{ .operand = input.*[start..i] });
                 } else {
-                    try list.append(.{ .tag = .minus, .value = input.*[i .. i + 1] });
+                    try list.append(.{ .operator = '-' });
                     i += 1;
                 }
             },
-            '/' => {
-                try list.append(.{ .tag = .slash, .value = input.*[i .. i + 1] });
-                i += 1;
-            },
-            '*' => {
-                try list.append(.{ .tag = .asterisk, .value = input.*[i .. i + 1] });
-                i += 1;
-            },
-            '(' => {
-                try list.append(.{ .tag = .l_paren, .value = input.*[i .. i + 1] });
-                i += 1;
-            },
-            ')' => {
-                try list.append(.{ .tag = .r_paren, .value = input.*[i .. i + 1] });
+            '+', '/', '*', '(', ')' => {
+                try list.append(.{ .operator = input.*[i] });
                 i += 1;
             },
             '0'...'9' => {
@@ -57,7 +44,7 @@ fn tokenize(allocator: std.mem.Allocator, input: *const []const u8) ![]Token {
                     i += 1;
                 }
 
-                try list.append(.{ .tag = .number, .value = input.*[start..i] });
+                try list.append(.{ .operand = input.*[start..i] });
             },
             '.' => {
                 const start = i;
@@ -65,10 +52,10 @@ fn tokenize(allocator: std.mem.Allocator, input: *const []const u8) ![]Token {
                 while (i < input.len and std.ascii.isDigit(input.*[i])) {
                     i += 1;
                 }
-                try list.append(.{ .tag = .number, .value = input.*[start..i] });
+                try list.append(.{ .operand = input.*[start..i] });
             },
             '\n' => break,
-            else => return error.UnexpectedToken,
+            else => return CalculatorError.UnexpectedToken,
         }
     }
     return list.toOwnedSlice();
@@ -76,38 +63,43 @@ fn tokenize(allocator: std.mem.Allocator, input: *const []const u8) ![]Token {
 
 fn validate(allocator: std.mem.Allocator, tokens: *const []const Token) !void {
     if (tokens.len < 3) {
-        return error.InvalidExpression;
+        return CalculatorError.InvalidExpression;
     }
 
-    var stack = std.ArrayList(Tag).init(allocator);
+    var stack = std.ArrayList(Token).init(allocator);
     defer stack.deinit();
 
     var previousToken: ?Token = undefined;
     for (tokens.*) |token| {
         if (previousToken != null) {
-            switch (token.tag) {
-                .number => {
-                    if (previousToken.?.tag == .number) {
-                        return error.InvalidExpression;
+            switch (token) {
+                .operand => {
+                    if (previousToken.? == .operand) {
+                        return CalculatorError.InvalidExpression;
                     }
                 },
-                .plus, .minus, .slash, .asterisk => {
-                    if (isOperator(previousToken.?.tag)) {
-                        return error.InvalidExpression;
-                    }
-                },
-                .l_paren => {
-                    if (previousToken.?.tag == .number) {
-                        return error.InvalidExpression;
-                    }
-                    try stack.append(token.tag);
-                },
-                .r_paren => {
-                    if (stack.items.len == 0) {
-                        return error.InvalidExpression;
-                    }
+                .operator => |value| {
+                    switch (value) {
+                        '+', '-', '/', '*' => {
+                            if (previousToken.? == .operator) {
+                                return CalculatorError.InvalidExpression;
+                            }
+                        },
+                        '(' => {
+                            if (previousToken.? == .operand) {
+                                return CalculatorError.InvalidExpression;
+                            }
+                            try stack.append(token);
+                        },
+                        ')' => {
+                            if (stack.items.len == 0) {
+                                return CalculatorError.InvalidExpression;
+                            }
 
-                    _ = stack.pop();
+                            _ = stack.pop();
+                        },
+                        else => return CalculatorError.InvalidExpression,
+                    }
                 },
             }
         }
@@ -127,35 +119,36 @@ fn postfix(allocator: std.mem.Allocator, tokens: *const []const Token) ![]Token 
     defer queue.deinit();
 
     for (tokens.*) |token| {
-        try switch (token.tag) {
-            .number => try queue.append(token),
-            .minus,
-            .plus,
-            .slash,
-            .asterisk,
-            => {
-                if (stack.items.len > 0) {
-                    const current = precedence(token.tag);
-                    const previous = precedence(stack.items[stack.items.len - 1].tag);
+        try ls: switch (token) {
+            .operand => try queue.append(token),
+            .operator => |value| {
+                try switch (value) {
+                    '+', '-', '/', '*' => {
+                        if (stack.items.len > 0) {
+                            const current = precedence(token.operator);
+                            const previous = precedence(stack.items[stack.items.len - 1].operator);
 
-                    if (current <= previous) {
-                        try queue.append(stack.pop().?);
-                    }
+                            if (current <= previous) {
+                                try queue.append(stack.pop().?);
+                            }
 
-                    try stack.append(token);
-                } else {
-                    try stack.append(token);
-                }
-            },
-            .l_paren => stack.append(token),
-            .r_paren => {
-                while (true) {
-                    const op = stack.pop().?;
-                    if (op.tag == .l_paren) {
-                        break;
-                    }
-                    try queue.append(op);
-                }
+                            try stack.append(token);
+                        } else {
+                            try stack.append(token);
+                        }
+                    },
+                    '(' => stack.append(token),
+                    ')' => {
+                        while (true) {
+                            const op = stack.pop().?;
+                            if (op.operator == '(') {
+                                break;
+                            }
+                            try queue.append(op);
+                        }
+                    },
+                    else => break :ls CalculatorError.InvalidExpression,
+                };
             },
         };
     }
@@ -172,17 +165,14 @@ fn evaluate(allocator: std.mem.Allocator, tokens: *const []const Token) !f64 {
     defer numStack.deinit();
 
     for (tokens.*) |token| {
-        switch (token.tag) {
-            .number => {
-                const num = try std.fmt.parseFloat(f64, token.value);
-                try numStack.append(num);
-            },
-            else => {
-                const b = numStack.pop().?;
-                const a = numStack.pop().?;
-                const result = try calculate(f64, a, b, token.tag);
-                try numStack.append(result);
-            },
+        if (token == .operand) {
+            const num = try std.fmt.parseFloat(f64, token.operand);
+            try numStack.append(num);
+        } else {
+            const b = numStack.pop().?;
+            const a = numStack.pop().?;
+            const result = try calculate(f64, a, b, token.operator);
+            try numStack.append(result);
         }
     }
     return numStack.items[0];
@@ -203,65 +193,59 @@ pub fn process(input: *const []const u8) !f64 {
     return try evaluate(allocator, &converted);
 }
 
-fn calculate(comptime T: type, num1: T, num2: T, op: Tag) !T {
+fn calculate(comptime T: type, num1: T, num2: T, op: u8) !T {
     return switch (op) {
-        .plus => num1 + num2,
-        .minus => num1 - num2,
-        .asterisk => num1 * num2,
-        .slash => if (num2 == 0) return error.DivisionByZero else num1 / num2,
+        '+' => num1 + num2,
+        '-' => num1 - num2,
+        '*' => num1 * num2,
+        '/' => if (num2 == 0) return error.DivisionByZero else num1 / num2,
         else => error.InvalidOperation,
     };
 }
-fn precedence(tag: Tag) u8 {
-    switch (tag) {
-        .plus, .minus => return 1,
-        .asterisk, .slash => return 2,
+fn precedence(op: u8) u8 {
+    switch (op) {
+        '+', '-' => return 1,
+        '*', '/' => return 2,
         else => return 0,
     }
 }
 
-fn isOperator(tag: Tag) bool {
+fn isOperator(tag: u8) bool {
     switch (tag) {
-        .plus, .minus, .slash, .asterisk => return true,
+        '+', '-', '/', '*' => return true,
         else => return false,
+    }
+}
+
+fn expectTokens(input: []const u8, expected: [*][]const u8) !void {
+    const tokens = try tokenize(std.testing.allocator, &input);
+    defer std.testing.allocator.free(tokens);
+
+    for (expected, tokens) |exp, token| {
+        switch (token) {
+            .operand => try std.testing.expectEqualStrings(exp, token.operand),
+            .operator => {
+                const slice: []const u8 = &[_]u8{token.operator};
+                try std.testing.expectEqualStrings(exp, slice);
+            },
+        }
     }
 }
 
 test "tokenize" {
     {
-        const input: []const u8 = "1+(2-3)";
-        const tokens = try tokenize(std.testing.allocator, &input);
-        defer std.testing.allocator.free(tokens);
-
-        const expected = [_][]const u8{ "1", "+", "(", "2", "-", "3", ")" };
-
-        for (tokens, expected) |token, exp| {
-            try std.testing.expectEqualStrings(exp, token.value);
-        }
+        var expected = [_][]const u8{ "1", "+", "(", "2", "-", "3", ")" };
+        try expectTokens("1+(2-3)", &expected);
     }
 
     {
-        const input: []const u8 = "-1+2";
-        const tokens = try tokenize(std.testing.allocator, &input);
-        defer std.testing.allocator.free(tokens);
-
-        const expected = [_][]const u8{ "-1", "+", "2" };
-
-        for (tokens, expected) |token, exp| {
-            try std.testing.expectEqualStrings(exp, token.value);
-        }
+        var expected = [_][]const u8{ "-1", "+", "2" };
+        try expectTokens("-1+2", &expected);
     }
 
     {
-        const input: []const u8 = "1+-1.1";
-        const tokens = try tokenize(std.testing.allocator, &input);
-        defer std.testing.allocator.free(tokens);
-
-        const expected = [_][]const u8{ "1", "+", "-1.1" };
-
-        for (tokens, expected) |token, exp| {
-            try std.testing.expectEqualStrings(exp, token.value);
-        }
+        var expected = [_][]const u8{ "1", "+", "-1.1" };
+        try expectTokens("1+-1.1", &expected);
     }
 }
 
@@ -269,7 +253,7 @@ test "validate" {
     const tokens = try tokenize(std.testing.allocator, &"1");
     defer std.testing.allocator.free(tokens);
 
-    try std.testing.expectError(error.InvalidExpression, validate(std.testing.allocator, &tokens));
+    try std.testing.expectError(CalculatorError.InvalidExpression, validate(std.testing.allocator, &tokens));
 }
 
 test "postfix" {
@@ -282,8 +266,15 @@ test "postfix" {
     defer std.testing.allocator.free(converted);
 
     for (converted, 0..) |item, i| {
-        const st = std.mem.eql(u8, item.value, expected[i .. i + 1]);
-        try std.testing.expect(st);
+        switch (item) {
+            .operand => {
+                const st = std.mem.eql(u8, item.operand, expected[i .. i + 1]);
+                try std.testing.expect(st);
+            },
+            .operator => {
+                try std.testing.expect(item.operator == expected[i]);
+            },
+        }
     }
 }
 
